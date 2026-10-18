@@ -99,7 +99,7 @@ export async function transcodeToMp3(input: Buffer): Promise<Buffer> {
   for (const [key, value] of Object.entries(uploadForm.parameters)) {
     formData.append(key, value);
   }
-  formData.append("file", new Blob([input]), "input-audio");
+  formData.append("file", new Blob([new Uint8Array(input)]), "input-audio");
   const uploadRes = await fetch(uploadForm.url, { method: "POST", body: formData });
   if (!uploadRes.ok) {
     throw new TranscodeError(`CloudConvert upload failed: ${uploadRes.statusText}`);
