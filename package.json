@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev --webpack",
     "build": "next build",
-    "postbuild": "cp .env.local .next/standalone/.env.local && cp -r public .next/standalone/public && rm -rf .next/standalone/.next/static && cp -r .next/static .next/standalone/.next/static",
+    "postbuild": "test -f .env.local && cp .env.local .next/standalone/.env.local; test -d .next/standalone && cp -r public .next/standalone/public && rm -rf .next/standalone/.next/static && cp -r .next/static .next/standalone/.next/static; true",
     "start": "next start",
     "lint": "eslint"
   },
