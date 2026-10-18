@@ -85,7 +85,7 @@ export async function POST(
     let contentType = file.type;
     if (isAudio) {
       // See send-media/route.ts for why MP3.
-      buffer = await transcodeToMp3(buffer);
+      buffer = await transcodeToMp3(buffer, contentType);
       contentType = "audio/mpeg";
     }
     // Still re-host to our own storage too, for the CRM's own thread display.

@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
       // OGG/Opus voice notes were tried extensively (link and upload-by-id,
       // multiple MIME/encoding variations) and consistently rejected by
       // Meta with a "Media upload error"; see whatsapp.service.ts.
-      buffer = await transcodeToMp3(buffer);
+      buffer = await transcodeToMp3(buffer, contentType);
       contentType = "audio/mpeg";
     }
     const { url } = await uploadMediaBuffer(tenantId, "whatsapp-outbound", buffer, contentType);

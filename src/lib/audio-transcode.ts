@@ -71,7 +71,29 @@ async function cloudConvertRequest(path: string, init?: RequestInit): Promise<Cl
  * on serverless/edge runtimes with no filesystem or subprocess support
  * (e.g. Cloudflare Workers), in addition to the VPS.
  */
-export async function transcodeToMp3(input: Buffer): Promise<Buffer> {
+const EXTENSION_BY_MIME: Record<string, string> = {
+  "audio/webm": "webm",
+  "audio/ogg": "ogg",
+  "audio/opus": "opus",
+  "audio/mp4": "m4a",
+  "audio/m4a": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/aac": "aac",
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+  "audio/wave": "wav",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/3gpp": "3gp",
+  "audio/amr": "amr",
+};
+
+export async function transcodeToMp3(input: Buffer, contentType?: string): Promise<Buffer> {
+  // CloudConvert's import/upload rejects filenames with no recognizable
+  // extension, so map the source content-type to one. Falls back to a
+  // generic container CloudConvert can still usually sniff correctly.
+  const extension = (contentType && EXTENSION_BY_MIME[contentType.split(";")[0].trim()]) || "webm";
+  const filename = `input-audio.${extension}`;
   const job = await cloudConvertRequest("/jobs", {
     method: "POST",
     body: JSON.stringify({
@@ -100,7 +122,7 @@ export async function transcodeToMp3(input: Buffer): Promise<Buffer> {
   for (const [key, value] of Object.entries(uploadForm.parameters)) {
     formData.append(key, value);
   }
-  formData.append("file", new Blob([new Uint8Array(input)]), "input-audio");
+  formData.append("file", new Blob([new Uint8Array(input)]), filename);
   const uploadRes = await fetch(uploadForm.url, { method: "POST", body: formData });
   if (!uploadRes.ok) {
     const body = await uploadRes.text().catch(() => "");
