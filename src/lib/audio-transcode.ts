@@ -18,6 +18,7 @@ interface CloudConvertTask {
     files?: { url: string }[];
   };
   message?: string;
+  code?: string;
 }
 
 interface CloudConvertJob {
@@ -102,7 +103,10 @@ export async function transcodeToMp3(input: Buffer): Promise<Buffer> {
   formData.append("file", new Blob([new Uint8Array(input)]), "input-audio");
   const uploadRes = await fetch(uploadForm.url, { method: "POST", body: formData });
   if (!uploadRes.ok) {
-    throw new TranscodeError(`CloudConvert upload failed: ${uploadRes.statusText}`);
+    const body = await uploadRes.text().catch(() => "");
+    throw new TranscodeError(
+      `CloudConvert upload failed: ${uploadRes.status} ${uploadRes.statusText} — ${body.slice(0, 300)}`
+    );
   }
 
   let finishedJob: CloudConvertJob | null = null;
@@ -114,8 +118,19 @@ export async function transcodeToMp3(input: Buffer): Promise<Buffer> {
       break;
     }
     if (polled.status === "error") {
-      const failedTask = polled.tasks.find((t) => t.status === "error");
-      throw new TranscodeError(`CloudConvert job failed: ${failedTask?.message ?? "unknown error"}`);
+      // Report the ROOT failing task (e.g. the upload itself), not just
+      // whichever task happens to be first — a downstream "convert" task
+      // failing because its input failed just says "Input task has failed",
+      // which hides the actual reason.
+      const importTask = polled.tasks.find((t) => t.name === "import-audio");
+      const errorTasks = polled.tasks.filter((t) => t.status === "error");
+      const root = importTask?.status === "error" ? importTask : errorTasks[0];
+      const detail = errorTasks
+        .map((t) => `${t.name}: ${t.message ?? "no message"}${t.code ? ` (${t.code})` : ""}`)
+        .join(" | ");
+      throw new TranscodeError(
+        `CloudConvert job failed — root: ${root?.name ?? "unknown"}: ${root?.message ?? "unknown"}. All failed tasks: ${detail}`
+      );
     }
   }
   if (!finishedJob) {
