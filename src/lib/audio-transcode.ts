@@ -1,11 +1,6 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { writeFile, readFile, unlink } from "fs/promises";
-import { tmpdir } from "os";
-import path from "path";
-import crypto from "crypto";
-
-const execFileAsync = promisify(execFile);
+const CLOUDCONVERT_API_URL = "https://api.cloudconvert.com/v2";
+const POLL_INTERVAL_MS = 2000;
+const POLL_MAX_ATTEMPTS = 30; // ~60s ceiling
 
 export class TranscodeError extends Error {
   constructor(message: string) {
@@ -14,56 +9,128 @@ export class TranscodeError extends Error {
   }
 }
 
+interface CloudConvertTask {
+  id: string;
+  name: string;
+  status: string;
+  result?: {
+    form?: { url: string; parameters: Record<string, string> };
+    files?: { url: string }[];
+  };
+  message?: string;
+}
+
+interface CloudConvertJob {
+  id: string;
+  status: string;
+  tasks: CloudConvertTask[];
+}
+
+async function cloudConvertRequest(path: string, init?: RequestInit): Promise<CloudConvertJob> {
+  const apiKey = process.env.CLOUDCONVERT_API_KEY;
+  if (!apiKey) {
+    throw new TranscodeError("CLOUDCONVERT_API_KEY is not configured");
+  }
+
+  const res = await fetch(`${CLOUDCONVERT_API_URL}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  const json = (await res.json()) as { data?: CloudConvertJob; message?: string };
+  if (!res.ok || !json.data) {
+    throw new TranscodeError(`CloudConvert API error: ${json.message ?? res.statusText}`);
+  }
+  return json.data;
+}
+
 /**
- * Transcodes an arbitrary audio buffer to MP3 via the system `ffmpeg` binary.
+ * Transcodes an arbitrary audio buffer to MP3 via the CloudConvert API.
  *
  * Why: Meta's Cloud API only documents support for aac/amr/mp3/mp4/ogg-opus.
  * Browser MediaRecorder output (webm/opus) and assorted phone recordings
  * (m4a, wav, ...) aren't guaranteed to be accepted as-is — sends were
  * observed failing silently (status: "failed" via the delivery webhook)
- * with no conversion step. Normalizing everything through ffmpeg removes
- * that guesswork.
+ * with no conversion step. Normalizing everything removes that guesswork.
  *
  * NOTE: WhatsApp only renders the native voice-note waveform bubble (mic
  * icon, play/pause, timer) for OGG/Opus — the exact format its own recorder
- * produces. OGG/Opus was tried here and verified correct at every layer
- * (valid Opus content, correct served Content-Type, unaffected by
- * user-agent) — Meta's Cloud API still rejected every send with a generic
- * "Media upload error" (code 131053) for this specific app/WABA, for
- * reasons outside what's diagnosable from our side. MP3 is the format
- * confirmed to actually deliver; it shows up on the recipient's side as a
- * plain audio-file attachment instead of a voice-note bubble.
+ * produces. OGG/Opus was tried and verified correct at every layer, but
+ * Meta's Cloud API still rejected every send with a generic "Media upload
+ * error" (code 131053) for this app/WABA at the time (that WABA was later
+ * found to be an unverified test account). MP3 is the format confirmed to
+ * actually deliver; it shows up on the recipient's side as a plain
+ * audio-file attachment instead of a voice-note bubble.
  *
- * Requires ffmpeg installed on the host (`apt install ffmpeg` on Debian/
- * Ubuntu) — throws a clear TranscodeError if the binary is missing so the
- * failure surfaces through the existing error banner instead of a vague 500.
+ * Runs via a hosted conversion API (not a local ffmpeg binary) so it works
+ * on serverless/edge runtimes with no filesystem or subprocess support
+ * (e.g. Cloudflare Workers), in addition to the VPS.
  */
 export async function transcodeToMp3(input: Buffer): Promise<Buffer> {
-  const id = crypto.randomUUID();
-  const inPath = path.join(tmpdir(), `${id}-in`);
-  const outPath = path.join(tmpdir(), `${id}-out.mp3`);
+  const job = await cloudConvertRequest("/jobs", {
+    method: "POST",
+    body: JSON.stringify({
+      tasks: {
+        "import-audio": { operation: "import/upload" },
+        "convert-audio": {
+          operation: "convert",
+          input: "import-audio",
+          output_format: "mp3",
+          engine: "ffmpeg",
+          audio_codec: "mp3",
+          audio_bitrate: 128,
+        },
+        "export-audio": { operation: "export/url", input: "convert-audio" },
+      },
+    }),
+  });
 
-  try {
-    await writeFile(inPath, input);
-    await execFileAsync("ffmpeg", [
-      "-y",
-      "-i", inPath,
-      "-c:a", "libmp3lame",
-      "-b:a", "128k",
-      "-vn",
-      outPath,
-    ]);
-    return await readFile(outPath);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("ENOENT")) {
-      throw new TranscodeError(
-        "ffmpeg is not installed on the server. Run: sudo apt install -y ffmpeg"
-      );
-    }
-    throw new TranscodeError(`Audio conversion failed: ${message}`);
-  } finally {
-    await unlink(inPath).catch(() => {});
-    await unlink(outPath).catch(() => {});
+  const uploadTask = job.tasks.find((t) => t.name === "import-audio");
+  const uploadForm = uploadTask?.result?.form;
+  if (!uploadForm) {
+    throw new TranscodeError("CloudConvert did not return an upload target");
   }
+
+  const formData = new FormData();
+  for (const [key, value] of Object.entries(uploadForm.parameters)) {
+    formData.append(key, value);
+  }
+  formData.append("file", new Blob([input]), "input-audio");
+  const uploadRes = await fetch(uploadForm.url, { method: "POST", body: formData });
+  if (!uploadRes.ok) {
+    throw new TranscodeError(`CloudConvert upload failed: ${uploadRes.statusText}`);
+  }
+
+  let finishedJob: CloudConvertJob | null = null;
+  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    const polled = await cloudConvertRequest(`/jobs/${job.id}`);
+    if (polled.status === "finished") {
+      finishedJob = polled;
+      break;
+    }
+    if (polled.status === "error") {
+      const failedTask = polled.tasks.find((t) => t.status === "error");
+      throw new TranscodeError(`CloudConvert job failed: ${failedTask?.message ?? "unknown error"}`);
+    }
+  }
+  if (!finishedJob) {
+    throw new TranscodeError("CloudConvert job timed out");
+  }
+
+  const exportTask = finishedJob.tasks.find((t) => t.name === "export-audio");
+  const fileUrl = exportTask?.result?.files?.[0]?.url;
+  if (!fileUrl) {
+    throw new TranscodeError("CloudConvert did not return a download URL");
+  }
+
+  const downloadRes = await fetch(fileUrl);
+  if (!downloadRes.ok) {
+    throw new TranscodeError(`Failed to download converted file: ${downloadRes.statusText}`);
+  }
+  return Buffer.from(await downloadRes.arrayBuffer());
 }
