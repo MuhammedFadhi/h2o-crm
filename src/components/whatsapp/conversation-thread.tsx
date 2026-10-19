@@ -249,6 +249,7 @@ function MediaContent({
 function formatTime(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleString(undefined, {
+    timeZone: "Asia/Riyadh",
     month: "short",
     day: "numeric",
     hour: "2-digit",

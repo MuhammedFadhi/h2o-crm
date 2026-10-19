@@ -105,6 +105,7 @@ function LogRow({ row }: { row: DebugLogRow }) {
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, {
+    timeZone: "Asia/Riyadh",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
