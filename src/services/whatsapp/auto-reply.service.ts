@@ -158,14 +158,10 @@ export class WhatsAppAutoReplyService {
       throw new Error(`Failed to persist inbound message: ${inboundError?.message}`);
     }
 
-    // Acknowledge read — fire-and-forget. Don't make the AI reply wait for
-    // a slow WhatsApp Graph API call.
-    void wa.markAsRead(message.id).catch((err: unknown) => {
-      console.warn("Failed to mark message read (non-blocking)", {
-        messageId: message.id,
-        err: err instanceof Error ? err.message : err,
-      });
-    });
+    // NOTE: read-receipt ("blue ticks") is intentionally NOT sent here on
+    // arrival — only right alongside an actual reply (see markInboundRead()
+    // calls below), so the customer doesn't see "read" with no response if
+    // the AI/business ends up not replying at all.
 
     // Ensure every inbound conversation has a lead (status 'new') with its
     // source flag, so ALL chats appear in the Leads list immediately — not
@@ -206,6 +202,7 @@ export class WhatsAppAutoReplyService {
       // Send out-of-hours message if configured
       if (config.out_of_hours_message?.trim()) {
         try {
+          this.markInboundRead(wa, message.id);
           const sent = await wa.sendTextMessage(contactPhone, config.out_of_hours_message);
           await this.persistOutboundMessage(supabase, {
             conversationId: conversation.id,
@@ -305,6 +302,7 @@ export class WhatsAppAutoReplyService {
         booking,
         decision,
         customerText: message.text.body,
+        inboundMessageId: message.id,
       });
       if (handled) {
         return {
@@ -343,6 +341,9 @@ export class WhatsAppAutoReplyService {
     }
 
     try {
+      // We're about to actually reply (text and/or images) — ack read now.
+      this.markInboundRead(wa, message.id);
+
       // 6a. Send product images BEFORE the text reply (if AI included any)
       const imageUrls = Array.isArray(decision.images_to_send)
         ? decision.images_to_send.filter((u): u is string => typeof u === "string" && u.startsWith("http"))
@@ -945,9 +946,10 @@ export class WhatsAppAutoReplyService {
       booking: any;
       decision: WhatsAppAIDecision;
       customerText: string;
+      inboundMessageId: string;
     }
   ): Promise<{ outboundId: string } | null> {
-    const { booking, decision, contactPhone, contactName, conversationId, userId } = params;
+    const { booking, decision, contactPhone, contactName, conversationId, userId, inboundMessageId } = params;
     const intent = decision.reschedule?.intent ?? "none";
     const text = params.customerText.trim();
     const newIso = decision.reschedule?.new_datetime_iso ?? null;
@@ -1018,6 +1020,7 @@ export class WhatsAppAutoReplyService {
       return null; // not a reschedule action — let the normal reply flow run
     }
 
+    this.markInboundRead(wa, inboundMessageId);
     const sent = await wa.sendTextMessage(contactPhone, replyText);
     const outboundId = await this.persistOutboundMessage(supabase, {
       conversationId,
@@ -1027,6 +1030,16 @@ export class WhatsAppAutoReplyService {
       aiGenerated: true,
     });
     return { outboundId };
+  }
+
+  /** Fire-and-forget read-receipt ack — call right alongside an actual reply send. */
+  private markInboundRead(wa: WhatsAppService, inboundMessageId: string): void {
+    void wa.markAsRead(inboundMessageId).catch((err: unknown) => {
+      console.warn("Failed to mark message read (non-blocking)", {
+        messageId: inboundMessageId,
+        err: err instanceof Error ? err.message : err,
+      });
+    });
   }
 
   private async persistOutboundMessage(
