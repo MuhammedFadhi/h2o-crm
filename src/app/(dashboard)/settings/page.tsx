@@ -6,6 +6,7 @@ import {
 } from "@/components/settings/platform-credentials-form";
 import { ApiKeysForm } from "@/components/settings/api-keys-form";
 import { UserApiKeysSection } from "@/components/settings/user-api-keys-section";
+import { OutboundWebhookSection } from "@/components/settings/outbound-webhook-section";
 import { ReplyTemplatesSection } from "@/components/settings/reply-templates-section";
 import { TeamSection } from "@/components/settings/team-section";
 
@@ -124,6 +125,7 @@ export default async function SettingsPage() {
           <div className="space-y-6">
             <ApiKeysForm initialConfigured={initialApiKeyConfigured} />
             <UserApiKeysSection />
+            <OutboundWebhookSection />
           </div>
         }
         quickRepliesContent={<ReplyTemplatesSection />}
