@@ -61,13 +61,36 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ conversationId: string }> }
 ) {
-  const userId = await resolveUserId(request);
-  if (!userId) return apiError("UNAUTHORIZED", "Authentication required", 401);
   const { conversationId } = await context.params;
+  const supabase = createAdminClient();
+  const tenantId = getTenantId();
+
+  // These four don't depend on each other — data scoping uses the fixed
+  // shared tenantId, not the authenticated userId, so the auth check can
+  // run alongside the lookups instead of blocking them.
+  const [userId, rawBody, convResult, credsResult] = await Promise.all([
+    resolveUserId(request),
+    request.json().catch(() => null),
+    supabase
+      .from("whatsapp_conversations")
+      .select("id, contact_phone, contact_name")
+      .eq("id", conversationId)
+      .eq("user_id", tenantId)
+      .maybeSingle<ConvRow>(),
+    supabase
+      .from("platform_credentials")
+      .select("credentials")
+      .eq("user_id", tenantId)
+      .eq("platform", "whatsapp")
+      .eq("is_active", true)
+      .maybeSingle<{ credentials: WhatsAppCredentials }>(),
+  ]);
+
+  if (!userId) return apiError("UNAUTHORIZED", "Authentication required", 401);
 
   let parsed: z.infer<typeof SendSchema>;
   try {
-    parsed = SendSchema.parse(await request.json());
+    parsed = SendSchema.parse(rawBody);
   } catch (err) {
     return apiError(
       "INVALID_REQUEST",
@@ -76,25 +99,9 @@ export async function POST(
     );
   }
 
-  const supabase = createAdminClient();
-  const tenantId = getTenantId();
-  const { data: conv } = await supabase
-    .from("whatsapp_conversations")
-    .select("id, contact_phone, contact_name")
-    .eq("id", conversationId)
-    .eq("user_id", tenantId)
-    .maybeSingle<ConvRow>();
-
+  const conv = convResult.data;
+  const credsRow = credsResult.data;
   if (!conv) return apiError("NOT_FOUND", "Conversation not found", 404);
-
-  const { data: credsRow } = await supabase
-    .from("platform_credentials")
-    .select("credentials")
-    .eq("user_id", tenantId)
-    .eq("platform", "whatsapp")
-    .eq("is_active", true)
-    .maybeSingle<{ credentials: WhatsAppCredentials }>();
-
   if (!credsRow) {
     return apiError("WHATSAPP_NOT_CONNECTED", "Connect WhatsApp in Settings first.", 400);
   }
@@ -102,30 +109,32 @@ export async function POST(
   const wa = new WhatsAppService(credsRow.credentials);
   try {
     const sent = await wa.sendTextMessage(conv.contact_phone, parsed.body);
+    const sentAt = new Date().toISOString();
 
-    const { data: message } = await supabase
-      .from("whatsapp_messages")
-      .insert({
-        conversation_id: conv.id,
-        user_id: tenantId,
-        wa_message_id: sent.messageId,
-        direction: "outbound",
-        message_type: "text",
-        body: parsed.body,
-        status: "sent",
-        ai_generated: false,
-        sent_at: new Date().toISOString(),
-      })
-      .select("id, direction, message_type, body, media_url, ai_generated, status, sent_at, created_at")
-      .single();
-
-    await supabase
-      .from("whatsapp_conversations")
-      .update({
-        last_message_at: new Date().toISOString(),
-        last_message_preview: parsed.body.slice(0, 200),
-      })
-      .eq("id", conv.id);
+    const [{ data: message }] = await Promise.all([
+      supabase
+        .from("whatsapp_messages")
+        .insert({
+          conversation_id: conv.id,
+          user_id: tenantId,
+          wa_message_id: sent.messageId,
+          direction: "outbound",
+          message_type: "text",
+          body: parsed.body,
+          status: "sent",
+          ai_generated: false,
+          sent_at: sentAt,
+        })
+        .select("id, direction, message_type, body, media_url, ai_generated, status, sent_at, created_at")
+        .single(),
+      supabase
+        .from("whatsapp_conversations")
+        .update({
+          last_message_at: sentAt,
+          last_message_preview: parsed.body.slice(0, 200),
+        })
+        .eq("id", conv.id),
+    ]);
 
     return apiSuccess({ message });
   } catch (err) {
