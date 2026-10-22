@@ -185,6 +185,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
  * row so delivery failures (e.g. "failed" with a Meta error) are visible
  * instead of silently dropped.
  */
+// Meta sends each status change (sent/delivered/read/failed) as a separate
+// webhook request. On an edge runtime these can be processed out of order
+// (no guarantee the "sent" write finishes before the "delivered" write), so
+// a naive update can let an older status clobber a newer one. Only allow
+// the status to move forward through this ranking — "failed" always wins.
+const STATUS_RANK: Record<string, number> = { sent: 1, delivered: 2, read: 3, failed: 99 };
+
 async function processStatusUpdates(
   userId: string,
   statuses: WhatsAppStatusUpdate[]
@@ -217,6 +224,21 @@ async function processStatusUpdates(
         "status_update",
         `Message to ${status.recipient_id} is now "${status.status}".`
       );
+    }
+
+    const { data: existing } = await supabase
+      .from("whatsapp_messages")
+      .select("status")
+      .eq("wa_message_id", status.id)
+      .eq("user_id", userId)
+      .maybeSingle<{ status: string }>();
+
+    const incomingRank = STATUS_RANK[status.status] ?? 0;
+    const currentRank = existing ? (STATUS_RANK[existing.status] ?? 0) : 0;
+    if (existing && incomingRank <= currentRank) {
+      // Out-of-order webhook (an older status arriving after a newer one
+      // already landed) — skip so we don't regress the displayed status.
+      continue;
     }
 
     const { error } = await supabase
