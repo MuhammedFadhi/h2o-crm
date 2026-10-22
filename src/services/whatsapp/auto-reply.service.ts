@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { logWhatsAppDebugEvent } from "@/lib/whatsapp-debug-log";
 import { generateOpenRouterJsonResponse } from "@/lib/openrouter";
 import { uploadMediaBuffer } from "@/services/media.service";
 import { WhatsAppService, WhatsAppApiError } from "@/services/platforms/whatsapp/whatsapp.service";
@@ -1034,12 +1035,28 @@ export class WhatsAppAutoReplyService {
 
   /** Fire-and-forget read-receipt ack — call right alongside an actual reply send. */
   private markInboundRead(wa: WhatsAppService, inboundMessageId: string): void {
-    void wa.markAsRead(inboundMessageId).catch((err: unknown) => {
-      console.warn("Failed to mark message read (non-blocking)", {
-        messageId: inboundMessageId,
-        err: err instanceof Error ? err.message : err,
+    void wa
+      .markAsRead(inboundMessageId)
+      .then(() => {
+        void logWhatsAppDebugEvent(
+          "info",
+          "mark_read_ack",
+          `markAsRead API call succeeded for inbound message ${inboundMessageId}.`
+        );
+      })
+      .catch((err: unknown) => {
+        void logWhatsAppDebugEvent(
+          "error",
+          "mark_read_failed",
+          `markAsRead API call FAILED for inbound message ${inboundMessageId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+        console.warn("Failed to mark message read (non-blocking)", {
+          messageId: inboundMessageId,
+          err: err instanceof Error ? err.message : err,
+        });
       });
-    });
   }
 
   private async persistOutboundMessage(
